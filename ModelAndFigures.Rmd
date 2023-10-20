@@ -1,0 +1,1107 @@
+---
+title: "FunctionalChanges_transects_Model"
+author: "laispetri"
+date: "`r format(Sys.time(), "%m/%d/%Y")`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+**Please, read these notes before running the code:**
+
+1. You will need to create the following folders in the working directory: "data", "figures", and "modelparameters".
+2. Paste the files from this webpage (10.6084/m9.figshare.24415648) inside of the "data" folder you just created.
+3. Note: figures included in the main manuscript or SM will not be displayed in the html file after knitting. They will be inside of the folder you created, "figures". The aspect ratio could not be maintained when knitting (probably due to my own coding limitation).
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+loading packages
+```{r}
+## data wrangling + plots
+library(tidyverse) 
+library(scales)
+## correlation plots
+library(ggcorrplot)
+## diversity metrics
+library(vegan)
+## models
+library(rjags)
+library(coda)
+## color blind discrete colors
+library(pals) 
+```
+
+Paths to import files, and export outputs
+```{r}
+workingdir <- getwd()
+datain <- file.path(workingdir, "datafinal/transects")
+graph.wd <- file.path(datain, "figures")
+parameters.wd <- file.path(datain, "modelParameters")
+```
+
+Defining colors
+```{r}
+categoryColor<-c(c("#1F9698","#783FC1"))
+categoryColor2<-c(c("#783FC1","#1F9698"))
+```
+
+
+importing data
+```{r}
+datafinalLES <- read.csv(file.path(datain,"datafinalLESNoCanopy.csv"), 
+                        header = TRUE, stringsAsFactors = FALSE) 
+glimpse(datafinalLES)
+```
+
+
+- calculates mean and range values across the entire dataset
+```{r}
+range(datafinalLES$cwmT_leafN_mg.g)
+range(datafinalLES$cwmT_SLA_mm2.mg)
+range(datafinalLES$cwmT_LDMC_g.g)
+range(datafinalLES$cwmN_leafN_mg.g)
+range(datafinalLES$cwmN_SLA_mm2.mg)
+range(datafinalLES$cwmN_LDMC_g.g)
+range(datafinalLES$pctCov_I)
+mean(datafinalLES$soil_totalN)
+mean(datafinalLES$richness_N)
+mean(datafinalLES$pielou_T)
+mean(datafinalLES$pielou_N)
+mean(datafinalLES$tgfMeanPlot)
+mean(datafinalLES$smMeanPlotRAW_8)
+mean(datafinalLES$pctCov_I)
+range(datafinalLES$tgfMeanPlot)
+range(datafinalLES$smMeanPlotRAW_8)
+```
+
+- calculates meand and SD per forest stand 
+```{r}
+datafinalLES %>% group_by(area) %>% summarise(Mean = mean(pctCov_I),
+                                              SD = sd(pctCov_I)) %>% arrange(Mean)
+datafinalLES %>% group_by(area) %>% summarise(Mean = mean(tgfMeanPlot),
+                                              SD = sd(tgfMeanPlot)) %>% arrange(Mean)
+datafinalLES %>% group_by(area) %>% summarise(Mean = mean(smMeanPlotRAW_8),
+                                              SD = sd(smMeanPlotRAW_8)) %>% arrange(Mean)
+
+```
+
+- histograms of response variables
+```{r}
+hist(datafinalLES$cwmT_leafN_mg.g)
+hist(datafinalLES$cwmN_leafN_mg.g)
+
+hist(datafinalLES$cwmT_SLA_mm2.mg)
+hist(datafinalLES$cwmN_SLA_mm2.mg)
+
+hist(datafinalLES$cwmT_LDMC_g.g)
+hist(datafinalLES$cwmN_LDMC_g.g)
+```
+
+- t-test Pielou
+```{r}
+x<-datafinalLES %>% select(pielou_T,pielou_N) %>% pivot_longer(pielou_T:pielou_N)
+t.test(value ~ name, x)
+```
+
+- correlation values of raw data
+```{r}
+CWMmetrics <- datafinalLES %>% 
+  select(-type,-area,-areaID,-transect,-transectID,-comm,-commID)%>% 
+  cor(use="complete.obs")
+
+ggcorrplot::ggcorrplot(CWMmetrics, 
+                       #method="circle",
+                       hc.order = F, 
+                       type = "lower",
+                       lab = T, 
+                       insig = "blank",
+                       tl.cex = 14,
+                       lab_size=4)
+```
+
+## Model
+Organizing variables
+```{r data formatting model}
+data <- datafinalLES
+datamodel <- list (P=length(unique(data$ID)), 
+                   S=length(unique(data$areaID)),
+                   lightSD=data$tgfSDPlot,
+                   lightM=data$tgfMeanPlot,
+                   soilwaterSD=data$smSDPlotRAW_8,  #month 
+                   soilwaterM=data$smMeanPlotRAW_8,
+                   coverInv=data$pctCov_I,
+                   richnessNat=data$richness_N,
+                   evennessN=data$pielou_N,
+                   evennessT=data$pielou_T,
+                   forest=data$areaID,
+                   cwmT=as.matrix(data[,6:8]),
+                   cwmN=as.matrix(data[,9:11]),
+                   OmegaT= structure(c(1,0,0,
+                                      0,1,0,
+                                      0,0,1), .Dim = c(3,3)),
+                   OmegaN= structure(c(1,0,0,
+                                      0,1,0,
+                                      0,0,1), .Dim = c(3,3))) 
+```
+
+Initials
+```{r}
+
+#Prior structure of the variance covariance matrix
+OmegaT= structure(c(1,0,0,
+                    0,1,0,
+                    0,0,1), .Dim = c(3,3))
+OmegaN= structure(c(1,0,0,
+                    0,1,0,
+                    0,0,1), .Dim = c(3,3))
+
+#number of covariates per model
+X<-5
+
+inits <- 
+  list(
+  list(alpha = c(rep(1, times=X)),
+       beta=c(rep(-1,times=X)),
+       gamma = c(rep(0.5, times=X)),
+       zeta = c(rep(0.5, times=X)),
+       eta = c(rep(1, times=X)),
+       theta = c(rep(-1, times=X)),
+       AA = 0,
+       BB = 0,
+       CC = 0,
+       GG = 0,
+       HH = 0,
+       II = 0,
+       RT = OmegaT,
+       RN = OmegaN),
+  list(alpha = c(rep(0.1, times=X)),
+       beta=c(rep(-0.1,times=X)),
+       gamma = c(rep(1, times=X)),
+       zeta = c(rep(1, times=X)),
+       eta = c(rep(-1, times=X)),
+       theta = c(rep(-0.1, times=X)),
+       AA = 40,
+       BB = 40,
+       CC = 10,
+       GG = 30,
+       HH = 40,
+       II = 10,
+       RT = OmegaT,
+       RN = OmegaN),
+  list(alpha = c(rep(0.5, times=X)),
+       beta=c(rep(-0.5,times=X)),
+       gamma = c(rep(-1, times=X)),
+       zeta = c(rep(-1, times=X)),
+       eta = c(rep(0.5, times=X)),
+       theta = c(rep(1, times=X)),
+       AA = 25,
+       BB = 25,
+       CC = 5,
+       GG = 15,
+       HH = 25,
+       II = 5,
+       RT = OmegaT,
+       RN = OmegaN)
+  )
+```
+
+Model code
+```{r Multinormal Model with predictions}
+Model1 <- "
+data{
+  
+  #scenarios
+  coverInvP<-c(0,25,50,75,100,125,150,185)
+
+  for(i in 1:P){
+    #estimating Light
+    lightTau[i]<-1/pow(lightSD[i],2)
+    light[i]~dnorm(lightM[i], lightTau[i])
+
+    #estimating Soil Moisture
+    soilwaterTau[i]<-1/pow(soilwaterSD[i],2)
+    soilWater[i]~dnorm(soilwaterM[i], soilwaterTau[i])
+   }
+}
+model{
+ for(i in 1:P){
+  
+  cwmT[i,1:3]~dmnorm(muT[i,],RT[,]) #likelihood total community
+  cwmT.pred[i,1:3]~dmnorm(muT[i,],RT[,]) #predicted
+  
+  cwmN[i,1:3]~dmnorm(muN[i,],RN[,]) #likelihood natives only
+  cwmN.pred[i,1:3]~dmnorm(muN[i,],RN[,]) #predicted
+  
+  #residuals
+  residualsT[i,1:3]<-cwmT.pred[i,1:3]-cwmT[i,1:3]
+  residualsN[i,1:3]<-cwmN.pred[i,1:3]-cwmN[i,1:3]
+  
+  #process models - total community
+  muT[i,1]<-A[forest[i]]+alpha[1]*coverInv[i]+alpha[2]*richnessNat[i]+alpha[3]*evennessT[i]+alpha[4]*light[i]+alpha[5]*soilWater[i]
+  muT[i,2]<-B[forest[i]]+beta[1]*coverInv[i]+beta[2]*richnessNat[i]+beta[3]*evennessT[i]+beta[4]*light[i]+beta[5]*soilWater[i]
+  muT[i,3]<-C[forest[i]]+gamma[1]*coverInv[i]+gamma[2]*richnessNat[i]+gamma[3]*evennessT[i]+gamma[4]*light[i]+gamma[5]*soilWater[i]
+
+  #process models - natives only
+  muN[i,1]<-G[forest[i]]+zeta[1]*coverInv[i]+zeta[2]*richnessNat[i]+zeta[3]*evennessN[i]+zeta[4]*light[i]+zeta[5]*soilWater[i]
+  muN[i,2]<-H[forest[i]]+eta[1]*coverInv[i]+eta[2]*richnessNat[i]+eta[3]*evennessN[i]+eta[4]*light[i]+eta[5]*soilWater[i]
+  muN[i,3]<-I[forest[i]]+theta[1]*coverInv[i]+theta[2]*richnessNat[i]+theta[3]*evennessN[i]+theta[4]*light[i]+theta[5]*soilWater[i]
+
+ } 
+  
+  #priors
+  ##intercepts
+  for(i in 1:S){ #number of areas
+    A[i]~dnorm(AA,tauA)
+    B[i]~dnorm(BB,tauB)
+    C[i]~dnorm(CC,tauC)
+    G[i]~dnorm(GG,tauG)
+    H[i]~dnorm(HH,tauH)
+    I[i]~dnorm(II,tauI)
+  }
+  
+  AA~dnorm(0,0.0001)
+  tauA~dgamma(0.0001,0.0001)
+  varA<-1/tauA
+  
+  BB~dnorm(0,0.0001)
+  tauB~dgamma(0.0001,0.0001)
+  varB<-1/tauB
+  
+  CC~dnorm(0,0.0001)
+  tauC~dgamma(0.0001,0.0001)
+  varC<-1/tauC
+
+  GG~dnorm(0,0.0001)
+  tauG~dgamma(0.0001,0.0001)
+  varG<-1/tauG
+  
+  HH~dnorm(0,0.0001)
+  tauH~dgamma(0.0001,0.0001)
+  varH<-1/tauH
+  
+  II~dnorm(0,0.0001)
+  tauI~dgamma(0.0001,0.0001)
+  varI<-1/tauI
+
+  ##predictors
+  for(i in 1:5){
+    alpha[i]~dnorm(0,0.001)
+    beta[i]~dnorm(0,0.001)
+    gamma[i]~dnorm(0,0.001)
+    zeta[i]~dnorm(0,0.001)
+    eta[i]~dnorm(0,0.001)
+    theta[i]~dnorm(0,0.001)
+  }
+  
+  ##variance-covariance matrix
+  RT[1:3,1:3]~dwish(OmegaT[,],3)
+  RN[1:3,1:3]~dwish(OmegaN[,],3)
+  
+  #scenarios
+  for(j in 1:8){
+    # likelihoods
+    cwmTP[j,1:3]~dmnorm(muTP[j,],RT[,]) #likelihood total community
+    cwmNP[j,1:3]~dmnorm(muNP[j,],RN[,]) #likelihood natives only
+    
+    #covariats are mean values
+    #process models - total community
+    muTP[j,1]<-AA+alpha[1]*coverInvP[j]+alpha[2]*11.04444+alpha[3]*0.6454031+alpha[4]*13.96526+alpha[5]*9.741111
+    muTP[j,2]<-BB+beta[1]*coverInvP[j]+beta[2]*11.04444+beta[3]*0.6454031+beta[4]*13.96526+beta[5]*9.741111
+    muTP[j,3]<-CC+gamma[1]*coverInvP[j]+gamma[2]*11.04444+gamma[3]*0.6454031+gamma[4]*13.96526+gamma[5]*9.741111
+
+    #process models - natives only
+    muNP[j,1]<-GG+zeta[1]*coverInvP[j]+zeta[2]*11.04444+zeta[3]*0.7112588+zeta[4]*13.96526+zeta[5]*9.741111
+    muNP[j,2]<-HH+eta[1]*coverInvP[j]+eta[2]*11.04444+eta[3]*0.7112588+eta[4]*13.96526+eta[5]*9.741111
+    muNP[j,3]<-II+theta[1]*coverInvP[j]+theta[2]*11.04444+theta[3]*0.7112588+theta[4]*13.96526+theta[5]*9.741111
+   }
+  
+  # #differences
+  for(z in 1:3){
+  diffT[z]<-cwmTP[8,z]-cwmTP[1,z]
+  diffN[z]<-cwmNP[8,z]-cwmNP[1,z]
+  }
+
+} #end of model"
+```
+
+Compile
+```{r}
+set.seed(500)
+m <-jags.model(textConnection(Model1), datamodel, inits, n.chains=3)
+```
+
+Burn-in  period of 10000 iterations
+```{r}
+set.seed(500)
+update(m, 100000)
+```
+
+Model DIC value
+```{r}
+set.seed(500)
+dic.samples(m, n.iter=1000, thin = 1, type = "pD")
+```
+
+Running model and retrieving parameters
+Plot: Posterior distributions
+```{r}
+set.seed(500)
+parameters<-coda.samples(m, c("RT","RN","A","AA","B","BB","C","CC","G","GG",
+                              "H","HH","I","II","alpha","beta","gamma","zeta","eta",
+                              "theta","tauA","tauB","tauC","tauG","tauH","tauI",
+                              "cwmN.pred","cwmT.pred","residualsT","residualsN","cwmTP","cwmNP","diffT","diffN"
+                              ), 
+                         n.iter = 100000, thin = 50)
+parameters0<-summary(parameters)
+
+pdf(paste0(file.path(parameters.wd,"PosteriorDistributionsMNormal.pdf")))
+par(mar = c(2, 2, 2, 2)) 
+plot(parameters)
+dev.off()
+```
+
+Exporting parameter values, predictions and residuals
+```{r}
+Stats <- as.data.frame(parameters0[1]) %>% mutate_if(is.numeric, round,digits=4) %>% rownames_to_column(., var = "ParameterID")
+write_csv(Stats, file.path(parameters.wd,"ParametersStatistics.csv"))
+
+Quantiles <- as.data.frame(parameters0[2]) %>% mutate_if(is.numeric, round,digits=4) %>% rownames_to_column(., var = "ParameterID")
+write_csv(Quantiles, file.path(parameters.wd,"ParametersQuantiles.csv"))
+
+predN <- as.data.frame(parameters0[1]) %>%  
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^cwmN.pred",parameter)) %>% 
+  select(-parameter) %>% 
+  mutate(ID=rep(1:90,each=1,times=3),trait=rep(c("leafN","SLA","LDMC"),each=90,times=1)) %>% pivot_wider(names_from = trait, values_from = c(statistics.Mean,statistics.SD,statistics.Naive.SE, statistics.Time.series.SE)) %>% select(-ID) %>% rename_all(function(x) paste0(x,"_predN")) %>% mutate(ID=row_number())
+write_csv(predN, file.path(parameters.wd,"PredictedN.csv"))
+
+predT <- as.data.frame(parameters0[1]) %>%  
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^cwmT.pred",parameter)) %>%
+  select(-parameter) %>% mutate(ID=rep(1:90,each=1,times=3),trait=rep(c("leafN","SLA","LDMC"),each=90,times=1)) %>% pivot_wider(names_from = trait, values_from = c(statistics.Mean,statistics.SD,statistics.Naive.SE, statistics.Time.series.SE)) %>% select(-ID) %>% rename_all(function(x) paste0(x,"_predT")) %>% mutate(ID=row_number())
+write_csv(predT, file.path(parameters.wd,"PredictedT.csv"))
+
+resT <- as.data.frame(parameters0[1]) %>%  
+   rownames_to_column(., var = "parameter") %>%
+  filter(grepl("^residualsT",parameter)) %>%
+  select(-parameter) %>%
+   mutate(ID=rep(1:90,each=1,times=3),trait=rep(c("leafN","SLA","LDMC"),each=90,times=1)) %>% pivot_wider(names_from = trait, values_from = c(statistics.Mean,statistics.SD,statistics.Naive.SE, statistics.Time.series.SE)) %>% select(-ID) %>% rename_all(function(x) paste0(x,"_resT")) %>% mutate(ID=row_number())
+write_csv(resT, file.path(parameters.wd,"ResidualsT.csv"))
+
+resN <- as.data.frame(parameters0[1]) %>%  
+   rownames_to_column(., var = "parameter") %>%
+  filter(grepl("^residualsN",parameter)) %>%
+  select(-parameter) %>%
+  mutate(ID=rep(1:90,each=1,times=3),trait=rep(c("leafN","SLA","LDMC"),each=90,times=1)) %>% pivot_wider(names_from = trait, values_from = c(statistics.Mean,statistics.SD,statistics.Naive.SE, statistics.Time.series.SE)) %>% select(-ID) %>% rename_all(function(x) paste0(x,"_resN")) %>% mutate(ID=row_number())
+write_csv(resN, file.path(parameters.wd,"ResidualsN.csv"))
+```
+
+Merging model predictions and raw data
+```{r}
+predModel <- data %>% 
+  left_join(resN,by = join_by(ID)) %>% left_join(resT,by = join_by(ID)) %>%
+  left_join(predN,by = join_by(ID)) %>% left_join(predT,by = join_by(ID))
+```
+
+Plot: predicted vs. observed
+```{r fit}
+Metric <- predModel$cwmT_leafN_mg.g
+Mean_pred <- predModel$statistics.Mean_leafN_predT
+
+# fit <- lm(Metric ~ Mean_pred - 1, data = predModel) # without intercept
+fit <- lm(Metric ~ Mean_pred, data = predModel)
+
+ggplot(data = predModel, aes(y = Metric, x = Mean_pred)) +
+  stat_function(fun = function(x) predict(fit, newdata = data.frame(Mean_pred = x)),
+                color = "black", linewidth = 2) +
+  annotate(label = sprintf("y = %.3f + %.3f x\nR² = %.2f", coef(fit)[1], coef(fit)[2], summary(fit)$r.squared),
+           geom = "text", x = 33, y = 20, size = 5) +
+  geom_point(shape=19,size=5,alpha=0.5) +
+  ylab("Observed values")+
+  xlab("Predicted values")+ 
+  theme_classic()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 25),
+        axis.text.x = element_text(size = 25),
+        axis.title = element_text(size = 25),
+        axis.line = element_line(colour = "black"))
+
+ggsave(file.path(graph.wd,"ModelFitT_leafN.png"), plot = last_plot(), width=7, height=5, dpi = 300, units="in")
+```
+
+```{r fit}
+Metric <- predModel$cwmN_leafN_mg.g
+Mean_pred <- predModel$statistics.Mean_leafN_predN
+
+# fit <- lm(Metric ~ Mean_pred - 1, data = predModel) # without intercept
+fit <- lm(Metric ~ Mean_pred, data = predModel)
+
+ggplot(data = predModel, aes(y = Metric, x = Mean_pred)) +
+  stat_function(fun = function(x) predict(fit, newdata = data.frame(Mean_pred = x)),
+                color = "black", linewidth = 2) +
+  annotate(label = sprintf("y = %.3f + %.3f x\nR² = %.2f", coef(fit)[1], coef(fit)[2], summary(fit)$r.squared),
+           geom = "text", x = 23, y = 18, size = 5) +
+  geom_point(shape=17,size=5,alpha=0.5) +
+  ylab("Observed values")+
+  xlab("Predicted values")+ 
+  theme_classic()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 25),
+        axis.text.x = element_text(size = 25),
+        axis.title = element_text(size = 25),
+        axis.line = element_line(colour = "black"))
+
+ggsave(file.path(graph.wd,"ModelFitN_leafN.png"), plot = last_plot(), width=7, height=5, dpi = 300, units="in")
+```
+
+```{r fit}
+Metric <- predModel$cwmT_SLA_mm2.mg
+Mean_pred <- predModel$statistics.Mean_SLA_predT
+
+# fit <- lm(Metric ~ Mean_pred - 1, data = predModel) # without intercept
+fit <- lm(Metric ~ Mean_pred, data = predModel)
+
+ggplot(data = predModel, aes(y = Metric, x = Mean_pred)) +
+  stat_function(fun = function(x) predict(fit, newdata = data.frame(Mean_pred = x)),
+                color = "black", linewidth = 2) +
+  annotate(label = sprintf("y = %.3f + %.3f x\nR² = %.2f", coef(fit)[1], coef(fit)[2], summary(fit)$r.squared),
+           geom = "text", x = 28, y = 15, size = 5) +
+  geom_point(shape=19,size=5,alpha=0.5) +
+  ylab("Observed values")+
+  xlab("Predicted values")+ 
+  theme_classic()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 25),
+        axis.text.x = element_text(size = 25),
+        axis.title = element_text(size = 25),
+        axis.line = element_line(colour = "black"))
+
+ggsave(file.path(graph.wd,"ModelFitT_SLA.png"), plot = last_plot(), width=7, height=5, dpi = 300, units="in")
+```
+
+```{r fit}
+Metric <- predModel$cwmN_SLA_mm2.mg
+Mean_pred <- predModel$statistics.Mean_SLA_predN
+
+# fit <- lm(Metric ~ Mean_pred - 1, data = predModel) # without intercept
+fit <- lm(Metric ~ Mean_pred, data = predModel)
+
+ggplot(data = predModel, aes(y = Metric, x = Mean_pred)) +
+  stat_function(fun = function(x) predict(fit, newdata = data.frame(Mean_pred = x)),
+                color = "black", linewidth = 2) +
+  annotate(label = sprintf("y = %.3f + %.3f x\nR² = %.2f", coef(fit)[1], coef(fit)[2], summary(fit)$r.squared),
+           geom = "text", x = 28, y = 15, size = 5) +
+  geom_point(shape=17,size=5,alpha=0.5) +
+  ylab("Observed values")+
+  xlab("Predicted values")+ 
+  theme_classic()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 25),
+        axis.text.x = element_text(size = 25),
+        axis.title = element_text(size = 25),
+        axis.line = element_line(colour = "black"))
+
+ggsave(file.path(graph.wd,"ModelFitN_SLA.png"), plot = last_plot(), width=7, height=5, dpi = 300, units="in")
+```
+
+```{r fit}
+Metric <- predModel$cwmT_LDMC_g.g
+Mean_pred <- predModel$statistics.Mean_LDMC_predT
+
+# fit <- lm(Metric ~ Mean_pred - 1, data = predModel) # without intercept
+fit <- lm(Metric ~ Mean_pred, data = predModel)
+
+ggplot(data = predModel, aes(y = Metric, x = Mean_pred)) +
+  stat_function(fun = function(x) predict(fit, newdata = data.frame(Mean_pred = x)),
+                color = "black", linewidth = 2) +
+  annotate(label = sprintf("y = %.3f + %.3f x\nR² = %.2f", coef(fit)[1], coef(fit)[2], summary(fit)$r.squared),
+           geom = "text", x = 0.3, y = 0.4, size = 5) +
+  geom_point(shape=19,size=5,alpha=0.5) +
+  ylab("Observed values")+
+  xlab("Predicted values")+ 
+  theme_classic()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 25),
+        axis.text.x = element_text(size = 25),
+        axis.title = element_text(size = 25),
+        axis.line = element_line(colour = "black"))
+
+ggsave(file.path(graph.wd,"ModelFitT_LDMC.png"), plot = last_plot(), width=7, height=5, dpi = 300, units="in")
+```
+
+
+```{r fit}
+Metric <- predModel$cwmN_LDMC_g.g
+Mean_pred <- predModel$statistics.Mean_LDMC_predN
+
+# fit <- lm(Metric ~ Mean_pred - 1, data = predModel) # without intercept
+fit <- lm(Metric ~ Mean_pred, data = predModel)
+
+ggplot(data = predModel, aes(y = Metric, x = Mean_pred)) +
+  stat_function(fun = function(x) predict(fit, newdata = data.frame(Mean_pred = x)),
+                color = "black", linewidth = 2) +
+  annotate(label = sprintf("y = %.3f + %.3f x\nR² = %.2f", coef(fit)[1], coef(fit)[2], summary(fit)$r.squared),
+           geom = "text", x = 0.3, y = 0.4, size = 5) +
+  geom_point(shape=17,size=5,alpha=0.5) +
+  ylab("Observed values")+
+  xlab("Predicted values")+ 
+  theme_classic()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 25),
+        axis.text.x = element_text(size = 25),
+        axis.title = element_text(size = 25),
+        axis.line = element_line(colour = "black"))
+
+ggsave(file.path(graph.wd,"ModelFitN_LDMC.png"), plot = last_plot(), width=7, height=5, dpi = 300, units="in")
+```
+
+Model results = Parameters
+- overall data frame
+```{r}
+alphas <- data.frame(ID=1:5,
+                    description=c("Cover Inv",
+                                  "Nat richness",
+                                  "Evennness",
+                                  "Light",
+                                  "Soil water"))
+
+Alpha1Mean <- mean(predModel$pctCov_I)
+Alpha2Mean <- mean(predModel$richness_N)
+Alpha3Mean <- mean(predModel$pielou_T)
+Alpha4Mean <- mean(predModel$tgfMeanPlot)
+Alpha5Mean <- mean(predModel$smMeanPlotRAW_8)
+```
+
+- LeafN 
+```{r}
+# total community
+ALPHAmodelpar<- as.data.frame(parameters0[2]) %>% 
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^alpha",parameter)) %>% 
+  mutate(ID=row_number(),
+         `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
+                         ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
+                         ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
+                         ifelse(ID==4,`quantiles.50.`*Alpha4Mean,`quantiles.50.`*Alpha5Mean)))),
+         `quantiles.2.5.`=ifelse(ID==1,`quantiles.2.5.`*Alpha1Mean,
+                          ifelse(ID==2,`quantiles.2.5.`*Alpha2Mean,
+                          ifelse(ID==3,`quantiles.2.5.`*Alpha3Mean,
+                          ifelse(ID==4,`quantiles.2.5.`*Alpha4Mean,`quantiles.2.5.`*Alpha5Mean)))),
+          `quantiles.97.5.`=ifelse(ID==1,`quantiles.97.5.`*Alpha1Mean,
+                                ifelse(ID==2,`quantiles.97.5.`*Alpha2Mean,
+                                       ifelse(ID==3,`quantiles.97.5.`*Alpha3Mean,
+                                              ifelse(ID==4,`quantiles.97.5.`*Alpha4Mean,`quantiles.97.5.`*Alpha5Mean)))),
+         filling=ifelse(`quantiles.2.5.`<0&`quantiles.97.5.`<0|
+                                                              `quantiles.2.5.`>0&`quantiles.97.5.`>0,
+                                                            "#1F9698","white"),
+         shape=21,
+         code="T") %>%
+  left_join(alphas)
+
+# natives only
+ALPHAmodelparN<- as.data.frame(parameters0[2]) %>% 
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^zeta",parameter)) %>% 
+  mutate(ID=row_number(),
+         `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
+                         ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
+                         ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
+                         ifelse(ID==4,`quantiles.50.`*Alpha4Mean,`quantiles.50.`*Alpha5Mean)))),
+         `quantiles.2.5.`=ifelse(ID==1,`quantiles.2.5.`*Alpha1Mean,
+                          ifelse(ID==2,`quantiles.2.5.`*Alpha2Mean,
+                          ifelse(ID==3,`quantiles.2.5.`*Alpha3Mean,
+                          ifelse(ID==4,`quantiles.2.5.`*Alpha4Mean,`quantiles.2.5.`*Alpha5Mean)))),
+          `quantiles.97.5.`=ifelse(ID==1,`quantiles.97.5.`*Alpha1Mean,
+                                ifelse(ID==2,`quantiles.97.5.`*Alpha2Mean,
+                                       ifelse(ID==3,`quantiles.97.5.`*Alpha3Mean,
+                                              ifelse(ID==4,`quantiles.97.5.`*Alpha4Mean,`quantiles.97.5.`*Alpha5Mean)))),
+         filling=ifelse(`quantiles.2.5.`<0&`quantiles.97.5.`<0|
+                                                              `quantiles.2.5.`>0&`quantiles.97.5.`>0,
+                                                            "#783FC1","white"),
+         shape=24,
+         code="N") %>%
+  left_join(alphas)  %>%
+  mutate(ID=ID+0.3) %>% 
+  rbind(ALPHAmodelpar)
+
+
+ALPHAmodelparN %>%
+  ggplot(aes(y=ID,x=`quantiles.50.`))+
+  coord_flip()+
+  geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5, linewidth=1)+
+  geom_errorbar(aes(xmin=`quantiles.2.5.`, xmax=`quantiles.97.5.`, color=as.factor(code)),width=.1, linewidth=1.3)+
+  geom_point(aes(color=as.factor(code)),shape=ALPHAmodelparN$shape,size=8,fill=ALPHAmodelparN$filling)+
+  scale_color_manual(values=categoryColor2,labels=c("Natives only","Total community"))+
+  scale_y_continuous(name = "",breaks = c(1.15,2.15,3.15,4.15,5.15),
+                     labels = c(" "," "," "," "," "))+
+  xlab("  ")+
+  ggtitle("Leaf N")+
+  scale_x_continuous(n.breaks = 6, labels = label_number(accuracy = 0.01))+
+  theme_classic()+
+  theme(text = element_text(size=20),
+        axis.text = element_text(size=18),
+        axis.title.x=element_blank(),
+        legend.text = element_text(size=14),
+        legend.title = element_blank(),
+        legend.background = element_blank(),
+        legend.position = c(0.85,0.20))+
+  guides(color=guide_legend(override.aes = list(linetype=0,size=5,shape=c(17,19))))
+
+ggsave(file.path(graph.wd,"ModelCovariates_leafN.png"), plot = last_plot(), width=8, height=4, dpi = 300, units="in")
+```
+
+- SLA 
+```{r}
+# total community
+ALPHAmodelpar<- as.data.frame(parameters0[2]) %>% 
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^beta",parameter)) %>% 
+  mutate(ID=row_number(),
+         # ID=c(2,3),
+         `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
+                         ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
+                         ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
+                         ifelse(ID==4,`quantiles.50.`*Alpha4Mean,`quantiles.50.`*Alpha5Mean)))),
+         `quantiles.2.5.`=ifelse(ID==1,`quantiles.2.5.`*Alpha1Mean,
+                          ifelse(ID==2,`quantiles.2.5.`*Alpha2Mean,
+                          ifelse(ID==3,`quantiles.2.5.`*Alpha3Mean,
+                          ifelse(ID==4,`quantiles.2.5.`*Alpha4Mean,`quantiles.2.5.`*Alpha5Mean)))),
+          `quantiles.97.5.`=ifelse(ID==1,`quantiles.97.5.`*Alpha1Mean,
+                                ifelse(ID==2,`quantiles.97.5.`*Alpha2Mean,
+                                       ifelse(ID==3,`quantiles.97.5.`*Alpha3Mean,
+                                              ifelse(ID==4,`quantiles.97.5.`*Alpha4Mean,`quantiles.97.5.`*Alpha5Mean)))),
+         filling=ifelse(`quantiles.2.5.`<0&`quantiles.97.5.`<0|
+                                                              `quantiles.2.5.`>0&`quantiles.97.5.`>0,
+                                                            "#1F9698","white"),
+         shape=21,
+         code="T") %>%
+  left_join(alphas)
+
+# natives only
+ALPHAmodelparN<- as.data.frame(parameters0[2]) %>% 
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^eta",parameter)) %>% 
+  mutate(ID=row_number(),
+         # ID=c(2,3),
+         `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
+                         ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
+                         ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
+                         ifelse(ID==4,`quantiles.50.`*Alpha4Mean,`quantiles.50.`*Alpha5Mean)))),
+         `quantiles.2.5.`=ifelse(ID==1,`quantiles.2.5.`*Alpha1Mean,
+                          ifelse(ID==2,`quantiles.2.5.`*Alpha2Mean,
+                          ifelse(ID==3,`quantiles.2.5.`*Alpha3Mean,
+                          ifelse(ID==4,`quantiles.2.5.`*Alpha4Mean,`quantiles.2.5.`*Alpha5Mean)))),
+          `quantiles.97.5.`=ifelse(ID==1,`quantiles.97.5.`*Alpha1Mean,
+                                ifelse(ID==2,`quantiles.97.5.`*Alpha2Mean,
+                                       ifelse(ID==3,`quantiles.97.5.`*Alpha3Mean,
+                                              ifelse(ID==4,`quantiles.97.5.`*Alpha4Mean,`quantiles.97.5.`*Alpha5Mean)))),
+         filling=ifelse(`quantiles.2.5.`<0&`quantiles.97.5.`<0|
+                                                              `quantiles.2.5.`>0&`quantiles.97.5.`>0,
+                                                            "#783FC1","white"),
+         shape=24,
+         code="N") %>%
+  left_join(alphas)  %>%
+  mutate(ID=ID+0.3) %>% 
+  rbind(ALPHAmodelpar)
+
+
+ALPHAmodelparN %>%
+  ggplot(aes(y=ID,x=`quantiles.50.`))+
+  coord_flip()+
+  geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5, linewidth=1)+
+  geom_errorbar(aes(xmin=`quantiles.2.5.`, xmax=`quantiles.97.5.`, color=as.factor(code)),width=.1, linewidth=1.3)+
+  geom_point(aes(color=as.factor(code)),shape=ALPHAmodelparN$shape,size=8,fill=ALPHAmodelparN$filling)+
+  scale_color_manual(values=categoryColor2,labels=c("Natives only","Total community"))+
+  scale_y_continuous(name = "",breaks = c(1.15,2.15,3.15,4.15,5.15),
+                     # labels = c("Cover Inv","Nat richness","Evennness","Light","Soil water"),
+                     labels = c(" "," "," "," "," "))+
+  xlab("Effects on CWM (mean+95%CI)")+
+  # xlab("  ")+
+  ggtitle("SLA")+
+  scale_x_continuous(n.breaks = 7, labels = label_number(accuracy = 0.01))+
+  theme_classic()+
+  theme(text = element_text(size=20),
+        axis.text = element_text(size=18),
+        axis.title.x=element_blank(),
+        legend.position = "none")+
+  guides(color=guide_legend(override.aes = list(linetype=0,size=5,shape=c(17,19))))
+
+ggsave(file.path(graph.wd,"ModelCovariates_SLA.png"), plot = last_plot(), width=8, height=4, dpi = 300, units="in")
+```
+
+- LDMC 
+```{r}
+# total community
+ALPHAmodelpar<- as.data.frame(parameters0[2]) %>% 
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^gamma",parameter)) %>% 
+  mutate(ID=row_number(),
+         # ID=c(2,3),
+         `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
+                         ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
+                         ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
+                         ifelse(ID==4,`quantiles.50.`*Alpha4Mean,`quantiles.50.`*Alpha5Mean)))),
+         `quantiles.2.5.`=ifelse(ID==1,`quantiles.2.5.`*Alpha1Mean,
+                          ifelse(ID==2,`quantiles.2.5.`*Alpha2Mean,
+                          ifelse(ID==3,`quantiles.2.5.`*Alpha3Mean,
+                          ifelse(ID==4,`quantiles.2.5.`*Alpha4Mean,`quantiles.2.5.`*Alpha5Mean)))),
+          `quantiles.97.5.`=ifelse(ID==1,`quantiles.97.5.`*Alpha1Mean,
+                                ifelse(ID==2,`quantiles.97.5.`*Alpha2Mean,
+                                       ifelse(ID==3,`quantiles.97.5.`*Alpha3Mean,
+                                              ifelse(ID==4,`quantiles.97.5.`*Alpha4Mean,`quantiles.97.5.`*Alpha5Mean)))),
+         filling=ifelse(`quantiles.2.5.`<0&`quantiles.97.5.`<0|
+                                                              `quantiles.2.5.`>0&`quantiles.97.5.`>0,
+                                                            "#1F9698","white"),
+         shape=21,
+         code="T") %>%
+  left_join(alphas)
+
+# natives only
+ALPHAmodelparN<- as.data.frame(parameters0[2]) %>% 
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^theta",parameter)) %>% 
+  mutate(ID=row_number(),
+         # ID=c(2,3),
+         `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
+                         ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
+                         ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
+                         ifelse(ID==4,`quantiles.50.`*Alpha4Mean,`quantiles.50.`*Alpha5Mean)))),
+         `quantiles.2.5.`=ifelse(ID==1,`quantiles.2.5.`*Alpha1Mean,
+                          ifelse(ID==2,`quantiles.2.5.`*Alpha2Mean,
+                          ifelse(ID==3,`quantiles.2.5.`*Alpha3Mean,
+                          ifelse(ID==4,`quantiles.2.5.`*Alpha4Mean,`quantiles.2.5.`*Alpha5Mean)))),
+          `quantiles.97.5.`=ifelse(ID==1,`quantiles.97.5.`*Alpha1Mean,
+                                ifelse(ID==2,`quantiles.97.5.`*Alpha2Mean,
+                                       ifelse(ID==3,`quantiles.97.5.`*Alpha3Mean,
+                                              ifelse(ID==4,`quantiles.97.5.`*Alpha4Mean,`quantiles.97.5.`*Alpha5Mean)))),
+         filling=ifelse(`quantiles.2.5.`<0&`quantiles.97.5.`<0|
+                                                              `quantiles.2.5.`>0&`quantiles.97.5.`>0,
+                                                            "#783FC1","white"),
+         shape=24,
+         code="N") %>%
+  left_join(alphas)  %>%
+  mutate(ID=ID+0.3) %>% 
+  rbind(ALPHAmodelpar)
+
+
+ALPHAmodelparN %>%
+  ggplot(aes(y=ID,x=`quantiles.50.`))+
+  coord_flip()+
+  geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5, linewidth=1)+
+  geom_errorbar(aes(xmin=`quantiles.2.5.`, xmax=`quantiles.97.5.`, color=as.factor(code)),width=.1, linewidth=1.3)+
+  geom_point(aes(color=as.factor(code)),shape=ALPHAmodelparN$shape,size=8,fill=ALPHAmodelparN$filling)+
+  scale_color_manual(values=categoryColor2,labels=c("Natives only","Total community"))+
+  scale_y_continuous(name = "",breaks = c(1.15,2.15,3.15,4.15,5.15),
+                     labels = c("Cover Inv","Nat richness","Evennness","Light","Soil water"))+
+  xlab("  ")+
+  ggtitle("LDMC")+
+  scale_x_continuous(n.breaks = 7)+
+  theme_classic()+
+  theme(text = element_text(size=20),
+        axis.text = element_text(size=18),
+        axis.title.x=element_blank(),
+        legend.position = "none")+
+  guides(color=guide_legend(override.aes = list(linetype=0,size=5,shape=c(17,19))))
+
+ggsave(file.path(graph.wd,"ModelCovariates_LDMC.png"), plot = last_plot(), width=8, height=4, dpi = 300, units="in")
+```
+
+Model predictions
+- all predictions
+```{r}
+Predictions <- as.data.frame(parameters0[2]) %>% 
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^cwmTP",parameter)|
+         grepl("^cwmNP",parameter)) %>% 
+  mutate(coverInvP=c(0,25,50,75,100,125,150,185, 0,25,50,75,100,125,150,185,0,25,50,75,100,125,150,185, 0,25,50,75,100,125,150,185,
+                     0,25,50,75,100,125,150,185, 0,25,50,75,100,125,150,185),
+         category = rep(c("N","T"), each=24, times=1),
+         trait=rep(c("leafN","SLA","LDMC"),each=8,times=2))
+```
+
+Plot: Leaf N
+```{r}
+RawData <- predModel %>% 
+  select(cwmT_leafN_mg.g, cwmN_leafN_mg.g, pctCov_I) %>% 
+  pivot_longer(cwmT_leafN_mg.g:cwmN_leafN_mg.g, names_to = "category", values_to = "CWM_LeafN") %>% 
+  arrange(category) %>% 
+  mutate(category= rep(c("N","T"),each=90,times=1),
+         shape=rep(c(17,19),each=90,times=1))
+
+Predictions %>% 
+  filter(trait=="leafN") %>% 
+  ggplot(aes(x=coverInvP)) +
+  geom_line(aes(y=`quantiles.50.`, color=as.factor(category), group=as.factor(category)), size=1.5) +
+  geom_point(data = RawData, aes(x=pctCov_I, y=CWM_LeafN,color=as.factor(category),     group=as.factor(category)),size=5,alpha=0.7, shape=RawData$shape) +
+  geom_ribbon(aes(ymin=`quantiles.2.5.`, ymax=`quantiles.97.5.`,
+                  fill=as.factor(category),
+                  group=as.factor(category)), alpha=0.2)+
+  ylab("CWM Leaf N (mg/g)")+
+  scale_x_continuous(expand = c(0,0))+ 
+  scale_color_manual(values = categoryColor2,
+                     labels=c("Natives Only","Total Community")
+                     )+
+  scale_fill_manual(values = categoryColor2,
+                     labels=c("Natives Only","Total Community")
+                     )+
+  theme_classic()+
+  theme(text = element_text(size = 20),
+        legend.position = c(0.17,0.94),
+        axis.text = element_text(size=18),
+        axis.text.x = element_text(color="white"),
+        axis.title.x=element_blank(),
+        legend.text = element_text(size=15),
+        legend.background = element_blank(),
+        legend.title = element_blank())+
+  guides(color="none", fill=guide_legend(override.aes = list(alpha=0.7)))
+
+ggsave(file.path(graph.wd,"ModelPredictions_leafN.png"), plot = last_plot(), width=8, height=4, dpi = 300, units="in")
+```
+
+Plot: SLA
+```{r}
+RawData <- predModel %>% 
+  select(cwmT_SLA_mm2.mg, cwmN_SLA_mm2.mg, pctCov_I) %>% 
+  pivot_longer(cwmT_SLA_mm2.mg:cwmN_SLA_mm2.mg, names_to = "category", values_to = "CWM_SLA") %>% 
+  arrange(category) %>% 
+  mutate(category= rep(c("N","T"),each=90,times=1),
+         shape=rep(c(17,19),each=90,times=1))
+
+Predictions %>% 
+  filter(trait=="SLA") %>% 
+  ggplot(aes(x=coverInvP)) +
+  geom_line(aes(y=`quantiles.50.`, color=as.factor(category), group=as.factor(category)), size=1.5) +
+  geom_point(data = RawData, aes(x=pctCov_I, y=CWM_SLA,color=as.factor(category),     group=as.factor(category)),size=5,alpha=0.7, shape=RawData$shape) +
+  geom_ribbon(aes(ymin=`quantiles.2.5.`, ymax=`quantiles.97.5.`,
+                  fill=as.factor(category),
+                  group=as.factor(category)), alpha=0.2)+
+  ylab(expression("CWM SLA (mm"^2*"/mg)"))+
+  scale_x_continuous(expand = c(0,0))+ 
+  scale_color_manual(values = categoryColor2,
+                     labels=c("Natives Only","Total Community")
+                     )+
+  scale_fill_manual(values = categoryColor2,
+                     labels=c("Natives Only","Total Community")
+                     )+
+  theme_classic()+
+  theme(text = element_text(size = 20),
+        axis.text = element_text(size = 18),
+        axis.title.y = element_text(vjust = -0.65),
+        axis.text.x = element_text(color="white"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+ggsave(file.path(graph.wd,"ModelPredictions_SLA.png"), plot = last_plot(), width=8, height=4, dpi = 300, units="in")
+```
+
+Plot: LDMC
+```{r}
+RawData <- predModel %>% 
+  select(cwmT_LDMC_g.g, cwmN_LDMC_g.g, pctCov_I) %>% 
+  pivot_longer(cwmT_LDMC_g.g:cwmN_LDMC_g.g, names_to = "category", values_to = "CWM_LDMC") %>% 
+  arrange(category) %>% 
+  mutate(category= rep(c("N","T"),each=90,times=1),
+         shape=rep(c(17,19),each=90,times=1))
+
+Predictions %>% 
+  filter(trait=="LDMC") %>% 
+  ggplot(aes(x=coverInvP)) +
+  geom_line(aes(y=`quantiles.50.`, color=as.factor(category), group=as.factor(category)), size=1.5) +
+  geom_point(data = RawData, aes(x=pctCov_I, y=CWM_LDMC,color=as.factor(category),     group=as.factor(category)),size=5,alpha=0.7, shape=RawData$shape) +
+  geom_ribbon(aes(ymin=`quantiles.2.5.`, ymax=`quantiles.97.5.`,
+                  fill=as.factor(category),
+                  group=as.factor(category)), alpha=0.2)+
+  ylab("CWM LDMC (g/g)")+
+  xlab("Invasive cover (%)")+
+  scale_x_continuous(expand = c(0,0))+ 
+  scale_y_continuous(limits=c(0,0.6))+
+  scale_color_manual(values = categoryColor2,
+                     labels=c("Natives Only","Total Community")
+                     )+
+  scale_fill_manual(values = categoryColor,
+                     labels=c("Natives Only2","Total Community")
+                     )+
+  theme_classic()+
+  theme(text = element_text(size = 20),
+        axis.text = element_text(size = 18),
+        legend.position = "none")
+
+ggsave(file.path(graph.wd,"ModelPredictions_LDMC.png"), plot = last_plot(), width=8, height=4, dpi = 300, units="in")
+```
+
+# differences
+```{r}
+parametersD <- as.data.frame(parameters0[2]) %>% 
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^diffT",parameter)|
+         grepl("^diffN",parameter)) %>% 
+  mutate(filling=ifelse(quantiles.2.5.<0&quantiles.97.5.<0|quantiles.2.5.>0&quantiles.97.5.>0,
+                                                            "black","white"),
+         ID=c(1.3,2.3,3.3,1,2,3),
+         shape=c(24,24,24,21,21,21),
+         group=c("N","N","N","T","T","T"),
+         filling=ifelse(group=="T"&filling=="black", "#1F9698",
+                        ifelse(group=="N"&filling=="black", "#783FC1",filling)))
+
+# corValues$group <- factor(corValues$group, levels = c("Total community","Native community"))
+
+parametersD %>%
+  mutate() %>% 
+  ggplot(aes(y=ID,x=quantiles.50.))+
+  geom_errorbar(aes(xmin=quantiles.2.5., xmax=quantiles.97.5., color=as.factor(group)),width=.1, linewidth=1.3)+
+  geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5, linewidth=1)+
+  geom_point(aes(color=as.factor(group)),shape=parametersD$shape,size=8,fill=parametersD$filling)+
+  scale_color_manual(values=categoryColor2,labels=c("Natives only","Total community"))+
+  xlab("Differences (mean+95%CI)")+
+  scale_y_continuous(name = "",breaks = c(1.15,2.15,3.15),trans="reverse",
+                     labels = c("Leaf N","SLA","LDMC"))+
+  theme_classic()+
+  theme(text = element_text(size=20),
+        axis.text = element_text(size=18),
+        legend.position = "none")+
+  guides(color=guide_legend(override.aes = list(linetype=0,size=5,shape=c(17,19))))
+
+ggsave(file.path(graph.wd,"ModelDiff.png"), plot = last_plot(), width=5.5, height=4, dpi = 300, units="in")
+```
+
+# correlation values
+```{r}
+Correlation<- as.data.frame(parameters0[2]) %>% 
+  rownames_to_column(., var = "parameter") %>% 
+  filter(grepl("^RN",parameter)|
+         grepl("^RT",parameter))
+
+# Total community
+## mean correlation values
+cov12 <- Correlation[11,4] # leafN and SLA
+sd1 <- 1/sqrt(Correlation[10,4])
+sd2 <- 1/sqrt(Correlation[14,4])
+(cor12 <- -(sd1*sd2)*cov12)
+
+cov23 <- Correlation[15,4] # LDMC and SLA
+sd3 <- 1/sqrt(Correlation[18,4])
+(cor23 <- -(sd3*sd2)*cov23)
+
+cov31 <- Correlation[12,4] # leafN and LDMC
+(cor31 <- -(sd3*sd1)*cov31)
+
+# Native community
+## mean correlation values
+cov12 <- Correlation[2,4] # leafN and SLA
+sd1 <- 1/sqrt(Correlation[1,4])
+sd2 <- 1/sqrt(Correlation[5,4])
+(cor12N <- -(sd1*sd2)*cov12)
+
+cov23 <- Correlation[6,4] # LDMC and SLA
+sd3 <- 1/sqrt(Correlation[9,4])
+(cor23N <- -(sd3*sd2)*cov23)
+
+cov31 <- Correlation[3,4] # leafN and LDMC
+(cor31N <- -(sd3*sd1)*cov31)
+
+
+corValues <- data.frame(description =c("Leaf N and SLA","LDMC and SLA","Leaf N and LDMC",
+                                       "Leaf N and SLA","LDMC and SLA","Leaf N and LDMC"),
+                        group=c("Total community","Total community","Total community","Native community","Native community","Native community"),
+                   corMean=c(cor12,cor23,cor31,cor12N,cor23N,cor31N))
+
+#Total Community
+## low end CI
+cov12 <- Correlation[11,2] # leafN and SLA
+sd1 <- 1/sqrt(Correlation[10,2])
+sd2 <- 1/sqrt(Correlation[14,2])
+(cor12 <- -(sd1*sd2)*cov12)
+
+cov23 <- Correlation[15,2] # LDMC and SLA
+sd3 <- 1/sqrt(Correlation[18,2])
+(cor23 <- -(sd3*sd2)*cov23)
+
+cov31 <- Correlation[12,2] # leafN and LDMC
+(cor31 <- -(sd3*sd1)*cov31)
+
+# Native community
+## low end CI
+cov12 <- Correlation[2,2] # leafN and SLA
+sd1 <- 1/sqrt(Correlation[1,2])
+sd2 <- 1/sqrt(Correlation[5,2])
+(cor12N <- -(sd1*sd2)*cov12)
+
+cov23 <- Correlation[6,2] # LDMC and SLA
+sd3 <- 1/sqrt(Correlation[9,2])
+(cor23N <- -(sd3*sd2)*cov23)
+
+cov31 <- Correlation[3,2] # leafN and LDMC
+(cor31N <- -(sd3*sd1)*cov31)
+
+corLCI <- c(cor12,cor23,cor31,cor12N,cor23N,cor31N)
+
+corValues <- corValues %>% cbind(corLCI)
+
+#Total Community
+## high end CI
+cov12 <- Correlation[11,6] # leafN and SLA
+sd1 <- 1/sqrt(Correlation[10,6])
+sd2 <- 1/sqrt(Correlation[14,6])
+(cor12 <- -(sd1*sd2)*cov12)
+
+cov23 <- Correlation[15,6] # LDMC and SLA
+sd3 <- 1/sqrt(Correlation[18,6])
+(cor23 <- -(sd3*sd2)*cov23)
+
+cov31 <- Correlation[12,6] # leafN and LDMC
+(cor31 <- -(sd3*sd1)*cov31)
+
+# Native community
+## low end CI
+cov12 <- Correlation[2,6] # leafN and SLA
+sd1 <- 1/sqrt(Correlation[1,6])
+sd2 <- 1/sqrt(Correlation[5,6])
+(cor12N <- -(sd1*sd2)*cov12)
+
+cov23 <- Correlation[6,6] # LDMC and SLA
+sd3 <- 1/sqrt(Correlation[9,6])
+(cor23N <- -(sd3*sd2)*cov23)
+
+cov31 <- Correlation[3,6] # leafN and LDMC
+(cor31N <- -(sd3*sd1)*cov31)
+
+corHCI <- c(cor12,cor23,cor31,cor12N,cor23N,cor31N)
+
+corValues <- corValues %>% cbind(corHCI) %>%
+  mutate(filling=ifelse(corLCI<0&corHCI<0|corLCI>0&corHCI>0,
+                                                            "black","white"),
+         ID=c(1,2,3,1.3,2.3,3.3),
+         shape=c(21,21,21,24,24,24),
+         filling=ifelse(group=="Total community"&filling=="black", "#1F9698",
+                        ifelse(group=="Native community"&filling=="black", "#783FC1",filling)))
+
+corValues %>%
+  mutate() %>% 
+  ggplot(aes(y=ID,x=corMean))+
+  geom_errorbar(aes(xmin=corLCI, xmax=corHCI, color=as.factor(group)),width=.1, linewidth=1.3)+
+  geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5, linewidth=1)+
+  geom_point(aes(color=as.factor(group)),shape=corValues$shape,size=8,fill=corValues$filling)+
+  scale_color_manual(values=categoryColor2,labels=c("Natives only","Total community"))+
+  xlab("Correlation (mean+95%CI)")+
+  scale_y_continuous(name = "",breaks = c(1.15,2.15,3.15),trans="reverse",
+                     labels = c("Leaf N and\nSLA","LDMC and\nSLA","Leaf N and\nLDMC"))+
+  theme_classic()+
+  theme(text = element_text(size=20),
+        axis.text = element_text(size=18),
+        legend.text = element_text(size=14),
+        legend.title = element_blank(),
+        legend.background = element_blank(),
+        legend.position = c(0.8,0.30))+
+  guides(color=guide_legend(override.aes = list(linetype=0,size=5,shape=c(17,19))))
+
+ggsave(file.path(graph.wd,"ModelCorrelations.png"), plot = last_plot(), width=6, height=4, dpi = 300, units="in")
+```
