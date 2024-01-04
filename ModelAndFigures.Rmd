@@ -37,9 +37,9 @@ library(pals)
 Paths to import files, and export outputs
 ```{r}
 workingdir <- getwd()
-datain <- file.path(workingdir, "datafinal/transects")
-graph.wd <- file.path(datain, "figures")
-parameters.wd <- file.path(datain, "modelParameters")
+datain <- file.path(workingdir, "data")
+graph.wd <- file.path(workingdir, "figures")
+parameters.wd <- file.path(workingdir, "modelparameters")
 ```
 
 Defining colors
@@ -644,7 +644,7 @@ ALPHAmodelparN %>%
   scale_y_continuous(name = "",breaks = c(1.15,2.15,3.15,4.15,5.15),
                      labels = c(" "," "," "," "," "))+
   xlab("  ")+
-  ggtitle("Leaf N")+
+  ggtitle("(a) Leaf N")+
   scale_x_continuous(n.breaks = 6, labels = label_number(accuracy = 0.01))+
   theme_classic()+
   theme(text = element_text(size=20),
@@ -666,7 +666,6 @@ ALPHAmodelpar<- as.data.frame(parameters0[2]) %>%
   rownames_to_column(., var = "parameter") %>% 
   filter(grepl("^beta",parameter)) %>% 
   mutate(ID=row_number(),
-         # ID=c(2,3),
          `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
                          ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
                          ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
@@ -691,7 +690,6 @@ ALPHAmodelparN<- as.data.frame(parameters0[2]) %>%
   rownames_to_column(., var = "parameter") %>% 
   filter(grepl("^eta",parameter)) %>% 
   mutate(ID=row_number(),
-         # ID=c(2,3),
          `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
                          ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
                          ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
@@ -726,8 +724,8 @@ ALPHAmodelparN %>%
                      labels = c(" "," "," "," "," "))+
   xlab("Effects on CWM (mean+95%CI)")+
   # xlab("  ")+
-  ggtitle("SLA")+
-  scale_x_continuous(n.breaks = 7, labels = label_number(accuracy = 0.01))+
+  ggtitle("(b) SLA")+
+  scale_x_continuous(n.breaks = 6, labels = label_number(accuracy = 0.01))+
   theme_classic()+
   theme(text = element_text(size=20),
         axis.text = element_text(size=18),
@@ -745,7 +743,6 @@ ALPHAmodelpar<- as.data.frame(parameters0[2]) %>%
   rownames_to_column(., var = "parameter") %>% 
   filter(grepl("^gamma",parameter)) %>% 
   mutate(ID=row_number(),
-         # ID=c(2,3),
          `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
                          ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
                          ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
@@ -770,7 +767,6 @@ ALPHAmodelparN<- as.data.frame(parameters0[2]) %>%
   rownames_to_column(., var = "parameter") %>% 
   filter(grepl("^theta",parameter)) %>% 
   mutate(ID=row_number(),
-         # ID=c(2,3),
          `quantiles.50.`=ifelse(ID==1,`quantiles.50.`*Alpha1Mean,
                          ifelse(ID==2,`quantiles.50.`*Alpha2Mean,
                          ifelse(ID==3,`quantiles.50.`*Alpha3Mean,
@@ -803,7 +799,7 @@ ALPHAmodelparN %>%
   scale_y_continuous(name = "",breaks = c(1.15,2.15,3.15,4.15,5.15),
                      labels = c("Cover Inv","Nat richness","Evennness","Light","Soil water"))+
   xlab("  ")+
-  ggtitle("LDMC")+
+  ggtitle("(c) LDMC")+
   scale_x_continuous(n.breaks = 7)+
   theme_classic()+
   theme(text = element_text(size=20),
@@ -847,6 +843,7 @@ Predictions %>%
                   group=as.factor(category)), alpha=0.2)+
   ylab("CWM Leaf N (mg/g)")+
   scale_x_continuous(expand = c(0,0))+ 
+  scale_y_continuous(limits = c(15, 39), breaks = seq(10, 37, by = 5)) +
   scale_color_manual(values = categoryColor2,
                      labels=c("Natives Only","Total Community")
                      )+
@@ -855,14 +852,15 @@ Predictions %>%
                      )+
   theme_classic()+
   theme(text = element_text(size = 20),
-        legend.position = c(0.17,0.94),
+        legend.position = c(0.15,0.81),
         axis.text = element_text(size=18),
         axis.text.x = element_text(color="white"),
         axis.title.x=element_blank(),
         legend.text = element_text(size=15),
         legend.background = element_blank(),
         legend.title = element_blank())+
-  guides(color="none", fill=guide_legend(override.aes = list(alpha=0.7)))
+  guides(color="none", fill=guide_legend(override.aes = list(alpha=0.7))) +
+  annotate("text", x = 14, y = 39, label = "(a)", hjust = 1.5, vjust = 1.5, size = 6, color = "black")
 
 ggsave(file.path(graph.wd,"ModelPredictions_leafN.png"), plot = last_plot(), width=8, height=4, dpi = 300, units="in")
 ```
@@ -898,7 +896,8 @@ Predictions %>%
         axis.title.y = element_text(vjust = -0.65),
         axis.text.x = element_text(color="white"),
         axis.title.x = element_blank(),
-        legend.position = "none")
+        legend.position = "none") +
+  annotate("text", x = 14, y = 37, label = "(b)", hjust = 1.5, vjust = 1.5, size = 6, color = "black")
 
 ggsave(file.path(graph.wd,"ModelPredictions_SLA.png"), plot = last_plot(), width=8, height=4, dpi = 300, units="in")
 ```
@@ -933,7 +932,8 @@ Predictions %>%
   theme_classic()+
   theme(text = element_text(size = 20),
         axis.text = element_text(size = 18),
-        legend.position = "none")
+        legend.position = "none")+
+  annotate("text", x = 14, y = 0.6, label = "(c)", hjust = 1.5, vjust = 1.5, size = 6, color = "black")
 
 ggsave(file.path(graph.wd,"ModelPredictions_LDMC.png"), plot = last_plot(), width=8, height=4, dpi = 300, units="in")
 ```
@@ -964,11 +964,13 @@ parametersD %>%
   xlab("Differences (mean+95%CI)")+
   scale_y_continuous(name = "",breaks = c(1.15,2.15,3.15),trans="reverse",
                      labels = c("Leaf N","SLA","LDMC"))+
+  coord_cartesian(ylim = c(3.5,0.9), xlim = c(-10, 20),clip = "off")+
   theme_classic()+
   theme(text = element_text(size=20),
         axis.text = element_text(size=18),
         legend.position = "none")+
-  guides(color=guide_legend(override.aes = list(linetype=0,size=5,shape=c(17,19))))
+  guides(color=guide_legend(override.aes = list(linetype=0,size=5,shape=c(17,19))))+
+  annotate("text", x = -7.5, y = 0.75, label = "(a)", hjust = 1.5, vjust = 1.5, size = 6, color = "black")
 
 ggsave(file.path(graph.wd,"ModelDiff.png"), plot = last_plot(), width=5.5, height=4, dpi = 300, units="in")
 ```
@@ -1094,6 +1096,7 @@ corValues %>%
   xlab("Correlation (mean+95%CI)")+
   scale_y_continuous(name = "",breaks = c(1.15,2.15,3.15),trans="reverse",
                      labels = c("Leaf N and\nSLA","LDMC and\nSLA","Leaf N and\nLDMC"))+
+  coord_cartesian(ylim = c(3.5,0.9), xlim = c(-0.3, 0.8),clip = "off")+
   theme_classic()+
   theme(text = element_text(size=20),
         axis.text = element_text(size=18),
@@ -1101,7 +1104,8 @@ corValues %>%
         legend.title = element_blank(),
         legend.background = element_blank(),
         legend.position = c(0.8,0.30))+
-  guides(color=guide_legend(override.aes = list(linetype=0,size=5,shape=c(17,19))))
+  guides(color=guide_legend(override.aes = list(linetype=0,size=5,shape=c(17,19))))+
+  annotate("text", x = -0.2, y = 0.75, label = "(b)", hjust = 1.5, vjust = 1.5, size = 6, color = "black")
 
 ggsave(file.path(graph.wd,"ModelCorrelations.png"), plot = last_plot(), width=6, height=4, dpi = 300, units="in")
 ```
