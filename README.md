@@ -1,6 +1,6 @@
-# Data from: Functional changes in understory forest community after invasion are driven by complementarity rather than displacement
+# Data from: Trait-related functional changes in understory forest community after invasion are driven by complementarity rather than displacement
 
-The files in Figshare allow readers to run models to reproduce results and figures of the paper "Functional changes in understory forest community after invasion are driven by complementarity rather than displacement", currently submitted to Frontiers in Ecology and Evolution.
+The files in Figshare (https://doi.org/10.6084/m9.figshare.24415648.v3) allow readers to run models to reproduce results and figures of the paper "Trait-related functional changes in understory forest community after invasion are driven by complementarity rather than displacement", currently accepted by Frontiers in Ecology and Evolution (doi: 10.3389/fevo.2024.1325275).
 
 The code to reproduce results and figures can be found at (https://github.com/laispetri/FunctionalChanges.git)
 
@@ -35,12 +35,13 @@ Here is the description of the CSV file needed:
   - pielou_N = Pielou's Evenness index calculated by plot for the native community (double);
   - richness_N = number of native species per plot (double);
   - pctCov_I = percent cover of invasive plant species per plot (double);
+  - totalCov = total plant percent cover per plot (double);
   - ID = unique identifier per observation (integer).
 
 Cells with missing data are filled with NAs.
 
 ## Sharing/Access information
 
-All four CSV files needed to run this code can be found in Figshare [https://doi.org/10.5061/dryad.mpg4f4r5w].
+All four CSV files needed to run this code can be found in Figshare [https://doi.org/10.6084/m9.figshare.24415648.v3].
 
 Please, cite the original paper (once it is published) if using any data or code shared here.
